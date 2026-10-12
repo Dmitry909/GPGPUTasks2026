@@ -22,7 +22,7 @@ __kernel void matrix_04_multiply_via_local_memory(
     const uint local_y = get_local_id(1);
 
     __local float rows[GROUP_SIZE_Y][STEP];
-    __local float columns[GROUP_SIZE_X][STEP];
+    __local float columns[STEP][GROUP_SIZE_X];
     float result = 0;
 
     const size_t step_count = (k + STEP - 1) / STEP;
@@ -36,15 +36,15 @@ __kernel void matrix_04_multiply_via_local_memory(
         }
 
         if (x < w && offset + local_y < k) {
-            columns[local_x][local_y] = b[(offset + local_y) * w + x];
+            columns[local_y][local_x] = b[(offset + local_y) * w + x];
         } else {
-            columns[local_x][local_y] = 0;
+            columns[local_y][local_x] = 0;
         }
 
         barrier(CLK_LOCAL_MEM_FENCE);
 
         for (size_t i = 0; i < STEP; ++i) {
-            result += rows[local_y][i] * columns[local_x][i];
+            result += rows[local_y][i] * columns[i][local_x];
         }
 
         barrier(CLK_LOCAL_MEM_FENCE);
