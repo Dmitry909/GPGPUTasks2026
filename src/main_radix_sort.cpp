@@ -88,7 +88,7 @@ void run(int argc, char** argv)
 
     // Аллоцируем буферы в VRAM
     gpu::gpu_mem_32u input_gpu(n);
-    gpu::gpu_mem_32u buffer1_gpu(n), buffer2_gpu(n), buffer3_gpu(n), buffer4_gpu(n); // TODO это просто шаблонка, можете переименовать эти буферы, сделать другого размера/типа, удалить часть, добавить новые
+    gpu::gpu_mem_32u level_prefix_sum(n), buffer2_gpu(n), buffer3_gpu(n), buffer4_gpu(n); // TODO это просто шаблонка, можете переименовать эти буферы, сделать другого размера/типа, удалить часть, добавить новые
     gpu::gpu_mem_32u buffer_output_gpu(n);
 
     // Прогружаем входные данные по PCI-E шине: CPU RAM -> GPU VRAM
@@ -96,7 +96,7 @@ void run(int argc, char** argv)
     // Советую занулить (или еще лучше - заполнить какой-то уникальной константой, например 255) все буферы
     // В некоторых случаях это ускоряет отладку, но обратите внимание, что fill реализован через копию множества нулей по PCI-E, то есть он очень медленный
     // Если вам нужно занулять буферы в процессе вычислений - используйте кернел который это сделает (см. кернел fill_buffer_with_zeros)
-    buffer1_gpu.fill(255);
+    level_prefix_sum.fill(255);
     buffer2_gpu.fill(255);
     buffer3_gpu.fill(255);
     buffer4_gpu.fill(255);
@@ -110,13 +110,62 @@ void run(int argc, char** argv)
         // Запускаем кернел, с указанием размера рабочего пространства и передачей всех аргументов
         // Если хотите - можете удалить ветвление здесь и оставить только тот код который соответствует вашему выбору API
         if (context.type() == gpu::Context::TypeOpenCL) {
-            // TODO
-            throw std::runtime_error(CODE_IS_NOT_IMPLEMENTED);
-            // ocl_fillBufferWithZeros.exec();
-            // ocl_radixSort01LocalCounting.exec();
-            // ocl_radixSort02GlobalPrefixesScanSumReduction.exec();
-            // ocl_radixSort03GlobalPrefixesScanAccumulation.exec();
-            // ocl_radixSort04Scatter.exec();
+            buffer_output_gpu = input_gpu;
+            for (uint bit_offset = 0; bit_offset < 32; bit_offset += 4) {
+                ocl_radixSort01LocalCounting.exec(
+                    gpu::WorkSize(GROUP_SIZE, n),
+                    buffer_output_gpu,
+                    level_prefix_sum,
+                    n,
+                    bit_offset
+                );
+    
+                uint counts_size = (n + GROUP_SIZE - 1) / GROUP_SIZE * 16;
+                std::vector<gpu::gpu_mem_32u> outputs;
+                while (counts_size > 0) {
+                    unsigned int groups_count = (counts_size + GROUP_SIZE - 1) / GROUP_SIZE;
+                    gpu::gpu_mem_32u output_gpu(counts_size);
+                    gpu::gpu_mem_32u block_sums(groups_count);
+
+                    ocl_radixSort02GlobalPrefixesScanSumReduction.exec(
+                        gpu::WorkSize(GROUP_SIZE, counts_size),
+                        level_prefix_sum,
+                        output_gpu,
+                        block_sums,
+                        counts_size
+                    );
+
+                    outputs.push_back(output_gpu);
+
+                    if (groups_count == 1) {
+                        break;
+                    }
+                    level_prefix_sum = block_sums;
+                    counts_size = groups_count;
+                }
+
+                for (size_t level = outputs.size(); level > 1; --level) {
+                    unsigned int level_size = outputs[level - 2].number();
+                    ocl_radixSort03GlobalPrefixesScanAccumulation.exec(
+                        gpu::WorkSize(GROUP_SIZE, level_size),
+                        outputs[level - 1], outputs[level - 2], level_size
+                    );
+                }
+
+                level_prefix_sum = outputs[0];
+
+                ocl_radixSort04Scatter.exec(
+                    gpu::WorkSize(GROUP_SIZE, n),
+                    buffer_output_gpu,
+                    level_prefix_sum,
+                    buffer2_gpu,
+                    n,
+                    bit_offset
+                );
+
+                buffer_output_gpu = buffer2_gpu;
+                std::swap(buffer2_gpu, buffer3_gpu);
+            }
         } else if (context.type() == gpu::Context::TypeCUDA) {
             // TODO
             throw std::runtime_error(CODE_IS_NOT_IMPLEMENTED);
